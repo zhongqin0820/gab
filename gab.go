@@ -4,8 +4,7 @@ import (
 	"crypto/tls"
 	"flag"
 	"fmt"
-	"io"
-	"io/ioutil"
+	"log"
 	"net/http"
 	"net/http/httptrace"
 	"net/url"
@@ -61,10 +60,11 @@ func main() {
 		<-sig
 		os.Exit(130)
 	}()
-	// mock running the job
-	Run(*cpus, num, conc, rawurl)
 	//
-	SequencialRun(num, rawurl)
+	const MAXSIZE int = 1<<31 - 1
+	worker := NewWorkerPool(conc, num, min(num, MAXSIZE), min(num, MAXSIZE), rawurl)
+	worker.Run()
+	log.Printf("QPS=%.2f\n", worker.GetQPS())
 }
 
 func validOptions(conc, num int) {
@@ -86,125 +86,130 @@ func printUsageAndExit(msg string) {
 	os.Exit(1)
 }
 
-//
-type result struct{}
+type Result struct{}
 
-func doRequest(c *http.Client, url string, ch chan<- result) {
-	// start of each request
-	// s := getNow()
-	var dnsStart, connStart, resStart, reqStart, delayStart time.Duration
-	var dnsDuration, connDuration, reqDuration, delayDuration time.Duration //resDuration,
-	req, _ := http.NewRequest("GET", url, nil)
-	// do the request
+type Job struct {
+	id  int
+	url string
+}
+
+// Process defines and replays the pipeline of httptrace
+func (j Job) Process() (*Result, error) {
+	log.Printf("start processing job %d\n", j.id)
+	req, _ := http.NewRequest("GET", j.url, nil)
+	tr := &http.Transport{
+		TLSClientConfig: &tls.Config{
+			InsecureSkipVerify: true,
+			ServerName:         req.Host,
+		},
+	}
+	tr.TLSNextProto = make(map[string]func(string, *tls.Conn) http.RoundTripper)
+	var Timeout int = 20
+	client := &http.Client{Transport: tr, Timeout: time.Duration(Timeout) * time.Second}
+	// define the trace
+	var connStart time.Duration = getNow()
+	var connDuration time.Duration
 	trace := &httptrace.ClientTrace{
-		DNSStart: func(info httptrace.DNSStartInfo) {
-			dnsStart = getNow()
-		},
-		DNSDone: func(dnsInfo httptrace.DNSDoneInfo) {
-			dnsDuration = getNow() - dnsStart
-		},
-		GetConn: func(h string) {
-			connStart = getNow()
-		},
 		GotConn: func(connInfo httptrace.GotConnInfo) {
 			if !connInfo.Reused {
 				connDuration = getNow() - connStart
 			}
-			reqStart = getNow()
-		},
-		WroteRequest: func(w httptrace.WroteRequestInfo) {
-			reqDuration = getNow() - reqStart
-			delayStart = getNow()
-		},
-		GotFirstResponseByte: func() {
-			delayDuration = getNow() - delayStart
-			resStart = getNow()
 		},
 	}
+	// replay the trace
 	req = req.WithContext(httptrace.WithClientTrace(req.Context(), trace))
-	resp, err := c.Do(req)
-	// end of each request
+	_, err := client.Do(req)
+	log.Printf("end processing job %d, cost %.2f s\n", j.id, connDuration.Seconds())
 	if err == nil {
-		io.Copy(ioutil.Discard, resp.Body)
-		resp.Body.Close()
+		return &Result{}, err
 	}
-	// need to calculate the result duration etc.
-	// t := getNow()
-	// send result
-	if err == nil {
-		ch <- result{}
-	}
+	return nil, err
 }
 
-func dispatchRequests(c *http.Client, url string, ch chan<- result, n int) {
-	for i := 0; i < n; i++ {
-		select {
-		default:
-			doRequest(c, url, ch)
-		}
-	}
-
+type WorkerPool struct {
+	done         chan struct{}
+	jobs         chan Job
+	results      chan Result
+	numOfWorkers int
+	numOfJobs    int
+	url          string
+	numOfConn    int64
+	timeUsed     time.Duration
 }
 
-func Run(cpus, n, c int, url string) (res float64) {
-	// init the required
-	req, _ := http.NewRequest("GET", url, nil)
-	tr := &http.Transport{
-		TLSClientConfig: &tls.Config{
-			InsecureSkipVerify: true,
-			ServerName:         req.Host,
-		},
+func NewWorkerPool(numOfWorkers, numOfJobs, numOfJobCache, numOfResCache int, url string) *WorkerPool {
+	pool := &WorkerPool{
+		done:         make(chan struct{}),
+		jobs:         make(chan Job, numOfJobCache),
+		results:      make(chan Result, numOfResCache),
+		numOfWorkers: numOfWorkers,
+		numOfJobs:    numOfJobs,
+		url:          url,
+		numOfConn:    0,
 	}
-	tr.TLSNextProto = make(map[string]func(string, *tls.Conn) http.RoundTripper)
-	var Timeout int = 20
-	client := &http.Client{Transport: tr, Timeout: time.Duration(Timeout) * time.Second}
-	const MAXSIZE int = 10000000
-	ch := make(chan result, MAXSIZE)
-	var wg sync.WaitGroup
-	wg.Add(c)
-	// start
+	return pool
+}
+
+// AllocateJobs is the producer of Chan Job
+func (p *WorkerPool) AllocateJobs() {
+	for i := 0; i < p.numOfJobs; i++ {
+		p.jobs <- Job{id: i, url: p.url}
+	}
+	close(p.jobs)
+}
+
+// GatherResults is the consumer of Chan Result
+func (p *WorkerPool) GatherResults() {
+	for result := range p.results {
+		_ = result
+		p.numOfConn++
+	}
+	p.done <- struct{}{}
+}
+
+// Run defines the pipeline of the pool
+func (p *WorkerPool) Run() {
+	// starting
 	s := getNow()
-	// during
-	for i := 0; i < c; i++ {
-		go func() {
-			defer wg.Done()
-			dispatchRequests(client, url, ch, n/c)
-		}()
+	// allocate jobs & gathering results
+	go p.AllocateJobs()
+	go p.GatherResults()
+	// worker
+	var wg sync.WaitGroup
+	for i := 0; i < p.numOfWorkers; i++ {
+		wg.Add(1)
+		go p.Worker(&wg)
 	}
 	wg.Wait()
+	close(p.results)
 	// end
-	total := getNow() - s
-	close(ch)
-	var cnt int = len(ch)
-	fmt.Printf("total requests=%d, total seconds=%.2f\n", cnt, total.Seconds())
-	res = float64(cnt) / total.Seconds()
-	fmt.Printf("QPS=%.1f\n", res)
-	return
+	<-p.done
+	e := getNow()
+	p.timeUsed = e - s
 }
 
-func SequencialRun(n int, url string) (res float64) {
-	// init the required
-	req, _ := http.NewRequest("GET", url, nil)
-	tr := &http.Transport{
-		TLSClientConfig: &tls.Config{
-			InsecureSkipVerify: true,
-			ServerName:         req.Host,
-		},
+// Worker is the consumer of Chan Job and producer of Chan Result
+func (p *WorkerPool) Worker(wg *sync.WaitGroup) {
+	defer wg.Done()
+	for job := range p.jobs {
+		result, err := job.Process()
+		if err == nil {
+			p.results <- *result
+		}
 	}
-	tr.TLSNextProto = make(map[string]func(string, *tls.Conn) http.RoundTripper)
-	var Timeout int = 20
-	client := &http.Client{Transport: tr, Timeout: time.Duration(Timeout) * time.Second}
-	const MAXSIZE int = 10000000
-	ch := make(chan result, MAXSIZE)
-	s := getNow()
-	// start
-	dispatchRequests(client, url, ch, n)
-	// end
-	total := getNow() - s
-	close(ch)
-	var cnt int = len(ch)
-	fmt.Printf("total requests=%d, total seconds=%.2f\n", cnt, total.Seconds())
-	res = float64(cnt) / total.Seconds()
-	fmt.Printf("QPS=%.1f\n", res)
-	return
+}
+
+// GetQPS returns numOfConn if timeUsed < 1 seconds
+func (p *WorkerPool) GetQPS() float64 {
+	if p.timeUsed.Seconds() < 1 {
+		return float64(p.numOfConn)
+	}
+	return float64(p.numOfConn) / p.timeUsed.Seconds()
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
