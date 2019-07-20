@@ -6,6 +6,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	"github.com/zhongqin0820/gab/internal"
 )
 
 func TestProcess(t *testing.T) {
@@ -15,7 +17,7 @@ func TestProcess(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(handler))
 	defer server.Close()
 
-	w := NewWorkerPool(3, 10, 20, 20, server.URL)
-	w.Run()
-	log.Printf("QPS=%.2f\n", w.GetQPS())
+	d := internal.NewDispatcher(3, 10, 20, 20, server.URL)
+	d.Run()
+	log.Printf("QPS=%.2f\n", d.GetQPS())
 }
