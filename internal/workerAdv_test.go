@@ -1,11 +1,12 @@
-package main
+package internal
 
 import (
 	"fmt"
-	"log"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	log "github.com/sirupsen/logrus"
 )
 
 func TestNewWorkerPoolAdv(t *testing.T) {
@@ -15,7 +16,7 @@ func TestNewWorkerPoolAdv(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(handler))
 	defer server.Close()
 
-	d := internal.NewDispatcherAdv(3, 10, 20, 20, server.URL)
+	d := NewDispatcherAdv(3, 10, 20, 20, server.URL)
 	d.Run()
 	log.Printf("QPS=%.2f\n", d.GetQPS())
 }

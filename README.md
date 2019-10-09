@@ -72,3 +72,6 @@ func (p *WorkerPool) Run() {
 - Figure out what are the main differences between the three testing types in [this blog](https://www.guru99.com/performance-vs-load-vs-stress-testing.html).
 - The pipeline of stress testing is illustrated in the [Framework](#framework) section.
 - A WorkerPool pattern is introduced in the Run procedure.
+
+# Further Reading
+- [Related resources](https://www.one-tab.com/page/PVPd6fUyTcGjUhy0Fhmldg)

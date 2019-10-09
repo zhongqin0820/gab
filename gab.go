@@ -3,7 +3,6 @@ package main
 import (
 	"flag"
 	"fmt"
-	"log"
 	"net/url"
 	"os"
 	"os/signal"
@@ -51,11 +50,11 @@ func main() {
 		<-sig
 		os.Exit(130)
 	}()
-	const MAXSIZE int = 1<<31 - 1
+	const MAXSIZE int = 1<<63 - 1
 	//
 	d := internal.NewDispatcher(conc, num, internal.Min(num, MAXSIZE), internal.Min(num, MAXSIZE), rawurl)
 	d.Run()
-	log.Printf("QPS=%.2f\n", d.GetQPS())
+	// log.Printf("QPS=%.2f\n", d.GetQPS())
 }
 
 func validOptions(conc, num int) {
